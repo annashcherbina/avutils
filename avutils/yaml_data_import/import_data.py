@@ -65,9 +65,12 @@ LabelsKeys = Keys(Key("file_name"),
 ###
 #Weight Keys
 ###
-WeightsKeys=Keys(Key("weights"), Key("output_mode_name",
-                                     default=DefaultModeNames.labels)) 
-
+WeightsKeys = Keys(Key("file_name"),
+                  Key("content_type", default=ContentTypes.floating.name),
+                  Key("file_with_subset_of_weight_names", default=None),
+                  Key("output_mode_name", default=DefaultModeNames.labels),
+                  Key("progress_update", default=None),
+		          Key("key_columns", default=[0]))
 ###
 #Split keys
 ###
@@ -84,12 +87,16 @@ class AbstractDataForSplitCompiler(object):
         self.split_name = split_name
         self.ids_in_split = ids_in_split
         self.output_mode_to_label_names = OrderedDict()
+        self.output_mode_to_weight_names = OrderedDict() 
 
     def add_features(self, the_id, input_mode, features):
         raise NotImplementedError() 
 
     def set_label_names(self, output_mode, label_names):
         self.output_mode_to_label_names[output_mode] = label_names
+
+    def set_weight_names(self, output_mode, weight_names):
+        self.output_mode_to_weight_names[output_mode] = weight_names
 
     def add_labels(self, the_id, output_mode, labels):
         raise NotImplementedError()
@@ -207,7 +214,7 @@ class Hdf5ForSplitCompiler(AbstractDataForSplitCompiler):
             mode_to_count=self.weights_output_mode_to_count,
             mode_to_buffer=self.weights_output_mode_to_buffer,
             hdf5grp=self.weights,
-            shape=[])
+            shape=[len(weights)])
 
     def extend_dataset(self, mode, the_id, vals,
                        mode_to_count, mode_to_buffer,
@@ -317,7 +324,19 @@ def process_combined_yamls(combined_yamls, split_compiler_factory):
         for split_name in split_names:
             split_name_to_compiler[split_name].add_weights(
                 the_id=the_id, weights=weights, output_mode=output_mode)
+
+    def set_weight_names_action(output_mode, weight_names):
+        for split_name in split_to_ids: 
+            split_name_to_compiler[split_name].set_weight_names(
+                output_mode=output_mode, weight_names=weight_names) 
+
+            
     #TODO: implement weights action
+    process_weights_with_weights_action(
+        weights_objects=combined_yamls[RootKeys.keys.weights],
+        weights_action=weights_action,
+        set_weight_names_action=set_weight_names_action)
+
   
     for compiler in split_name_to_compiler.values():
         compiler.finalize() 
@@ -408,7 +427,53 @@ def process_labels_with_labels_action(labels_objects,
             action=action,
             transformation=fp.default_tab_seppd,
             progress_update=labels_object[LabelsKeys.keys.progress_update])
-        
+
+def process_weights_with_weights_action(weights_objects,
+                                        weights_action,
+                                        set_weight_names_action): 
+    print("Reading in weights")
+    for weights_object in weights_objects:
+        WeightsKeys.check_for_unsupported_keys_and_fill_in_defaults(
+                    weights_object)
+        output_mode = weights_object[WeightsKeys.keys.output_mode_name] 
+
+        weights_file_name = weights_object[WeightsKeys.keys.file_name]
+        file_with_subset_of_weight_names =\
+            weights_object[WeightsKeys.keys.file_with_subset_of_weight_names]
+        content_type=get_content_type_from_name(
+                      weights_object[WeightsKeys.keys.content_type])
+        subset_of_columns_to_use_options=\
+          (None if file_with_subset_of_weight_names is None
+            else fp.SubsetOfColumnsToUseOptions(
+                    column_names=fp.read_rows_into_arr(
+                                    fp.get_file_handle(
+                                    file_with_subset_of_weight_names))))
+        core_titled_mapping_action = fp.get_core_titled_mapping_action(
+            subset_of_columns_to_use_options=\
+                subset_of_columns_to_use_options,
+                content_type=content_type,
+                content_start_index=1,
+                key_columns=weights_object[WeightsKeys.keys.key_columns])
+
+        def action(inp, line_number):
+            if (line_number==1):
+                #If this is the first row, then pick out the list
+                #of names relevant in the title
+                weight_names = core_titled_mapping_action(inp, line_number)
+                set_weight_names_action(output_mode=output_mode,
+                                       weight_names=weight_names)
+            else:
+                #otherwise, pick out the weights
+                the_id, weights = core_titled_mapping_action(inp, line_number)
+                weights_action(output_mode=output_mode,
+                              the_id=the_id,
+                              weights=weights)
+        fp.perform_action_on_each_line_of_file(
+            file_handle=fp.get_file_handle(weights_file_name),
+            action=action,
+            transformation=fp.default_tab_seppd,
+            progress_update=weights_object[WeightsKeys.keys.progress_update])
+
 
 def get_id_to_split_names(split_object):
     """
